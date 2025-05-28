@@ -3384,75 +3384,49 @@ struct server_context {
         }
 
         // process the created batch of tokens
-        for (int32_t i = 0; i < batch.n_tokens; i += n_batch) {
-            const int32_t n_tokens = std::min(n_batch, batch.n_tokens - i);
+        {
+            const int ret = llama_decode(ctx, batch);
 
-            llama_batch batch_view = {
-                n_tokens,
-                batch.token    + i,
-                nullptr,
-                batch.pos      + i,
-                batch.n_seq_id + i,
-                batch.seq_id   + i,
-                batch.logits   + i,
-            };
+            if (ret != 0) {
+                std::string err;
 
-            const int ret = llama_decode(ctx, batch_view);
+                if (ret == 1) {
+                    err = "Context size has been exceeded.";
+                }
+
+                if (ret == -1) {
+                    err = "Invalid input batch.";
+                }
+
+                if (ret < -1) {
+                    err = "Compute error.";
+                }
+
+                if (!err.empty()) {
+                    SRV_ERR("%s, n_batch = %d, ret = %d\n", err.c_str(), n_batch, ret);
+                    for (auto & slot : slots) {
+                        slot.release();
+                        send_error(slot, err);
+                    }
+
+                    return;
+                }
+            }
 
             metrics.on_decoded(slots);
 
-            if (ret != 0) {
-                {
-                    std::string err;
-
-                    if (n_batch == 1 && ret == 1) {
-                        err = "Context size has been exceeded.";
-                    }
-
-                    if (ret == -1) {
-                        err = "Invalid input batch.";
-                    }
-
-                    if (ret < -1) {
-                        err = "Compute error.";
-                    }
-
-                    if (!err.empty()) {
-                        SRV_ERR("%s, i = %d, n_batch = %d, ret = %d\n", err.c_str(), i, n_batch, ret);
-                        for (auto & slot : slots) {
-                            slot.release();
-                            send_error(slot, err);
-                        }
-                        break;
-                    }
-                }
-
-                // retry with half the batch size to try to find a free slot in the KV cache
-                n_batch /= 2;
-
-                SRV_WRN("failed to find free space in the KV cache, retrying with smaller batch size - try increasing it via the context size or enable defragmentation, i = %d, n_batch = %d, ret = %d\n", i, n_batch, ret);
-
-                i -= n_batch;
-
-                continue; // continue loop of n_batch
-            }
-
             for (auto & slot : slots) {
-                if (slot.i_batch < (int) i || slot.i_batch >= (int) (i + n_tokens)) {
-                    continue; // continue loop of slots
-                }
-
                 if (slot.state == SLOT_STATE_DONE_PROMPT) {
                     if (slot.task_type == SERVER_TASK_TYPE_EMBEDDING) {
                         // prompt evaluated for embedding
-                        send_embedding(slot, batch_view);
+                        send_embedding(slot, batch);
                         slot.release();
                         slot.i_batch = -1;
                         continue; // continue loop of slots
                     }
 
                     if (slot.task_type == SERVER_TASK_TYPE_RERANK) {
-                        send_rerank(slot, batch_view);
+                        send_rerank(slot, batch);
                         slot.release();
                         slot.i_batch = -1;
                         continue; // continue loop of slots
@@ -3464,7 +3438,7 @@ struct server_context {
                     continue; // continue loop of slots
                 }
 
-                const int tok_idx = slot.i_batch - i;
+                const int tok_idx = slot.i_batch;
 
                 llama_token id = common_sampler_sample(slot.smpl, ctx, tok_idx);
 

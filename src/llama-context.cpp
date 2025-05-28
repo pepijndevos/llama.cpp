@@ -420,9 +420,9 @@ const llama_kv_cache * llama_context::get_kv_self() const {
     return kv_self;
 }
 
-void llama_context::kv_self_update() {
+bool llama_context::kv_self_update() {
     if (!memory) {
-        return;
+        return false;
     }
 
     llama_kv_cache * kv_self = static_cast<llama_kv_cache *>(memory.get());
@@ -438,7 +438,11 @@ void llama_context::kv_self_update() {
         if (!gf) {
             LLAMA_LOG_ERROR("%s: failed to reserve graph after the KV cache update\n", __func__);
         }
+
+        return true;
     }
+
+    return false;
 }
 
 enum llama_pooling_type llama_context::pooling_type() const {
@@ -891,25 +895,53 @@ int llama_context::decode(llama_batch & inp_batch) {
     // handle any pending defrags/shifts
     kv_self_update();
 
-    auto decode_state = kv_self->init(batch, cparams.n_ubatch, embd_pooled, /* logits_all */ n_outputs_all == n_tokens_all);
-    if (!decode_state) {
-        return -2;
-    }
+    llama_memory_decode_state_ptr decode_state;
 
-    switch (decode_state->get_status()) {
-        case LLAMA_MEMORY_STATUS_SUCCESS:
-            {
-            } break;
-        case LLAMA_MEMORY_STATUS_FAILED_PREPARE:
-            {
-                // not a fatal error, we can re-try with a different batch
-                return 1;
-            }
-        case LLAMA_MEMORY_STATUS_FAILED_COMPUTE:
-            {
-                return -2;
-            }
-    }
+    bool did_defrag = false;
+    auto n_ubatch = cparams.n_ubatch;
+
+    do {
+        decode_state = kv_self->init(batch, n_ubatch, embd_pooled, /* logits_all */ n_outputs_all == n_tokens_all);
+        if (!decode_state) {
+            return -2;
+        }
+
+        switch (decode_state->get_status()) {
+            case LLAMA_MEMORY_STATUS_SUCCESS:
+                {
+                } break;
+            case LLAMA_MEMORY_STATUS_FAILED_PREPARE:
+                {
+                    if (!did_defrag) {
+                        did_defrag = true;
+
+                        kv_self->defrag_sched(-1.0f);
+                        if (kv_self_update()) {
+                            LLAMA_LOG_DEBUG("%s: failed to init batch of size %d, retrying after defrag\n", __func__, batch.n_tokens);
+
+                            continue;
+                        }
+                    }
+
+                    if (n_ubatch > 1) {
+                        n_ubatch /= 2;
+
+                        LLAMA_LOG_DEBUG("%s: failed to find free space in the KV cache, retrying with smaller ubatch size: n_ubatch = %d\n", __func__, n_ubatch);
+                        continue;
+                    }
+
+                    LLAMA_LOG_WARN("%s: failed to find KV cache slot for batch of size %d\n", __func__, batch.n_tokens);
+
+                    return 1;
+                }
+            case LLAMA_MEMORY_STATUS_FAILED_COMPUTE:
+                {
+                    return -2;
+                }
+        }
+
+        break;
+    } while(true);
 
     // reserve output buffer
     if (output_reserve(n_outputs_all) < n_outputs_all) {
@@ -2588,22 +2620,8 @@ int32_t llama_encode(
 int32_t llama_decode(
         llama_context * ctx,
           llama_batch   batch) {
-    int ret = ctx->decode(batch);
-
-    // defrag and try again
-    // TODO: distinguish return code when we are sure that even after defrag there is no space available
-    if (ret == 1) {
-        llama_kv_self_defrag(ctx);
-        ret = ctx->decode(batch);
-
-        if (ret == 1) {
-            LLAMA_LOG_WARN("%s: failed to find KV cache slot for batch of size %d\n", __func__, batch.n_tokens);
-
-            return ret;
-        }
-    }
-
-    if (ret != 0) {
+    const int ret = ctx->decode(batch);
+    if (ret != 0 && ret != 1) {
         LLAMA_LOG_ERROR("%s: failed to decode, ret = %d\n", __func__, ret);
     }
 
