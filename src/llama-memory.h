@@ -42,6 +42,15 @@ enum llama_memory_status {
     LLAMA_MEMORY_STATUS_FAILED_COMPUTE,
 };
 
+// the interface for managing the memory state during batch processing
+// this interface is extended per memory type with specific methods used for constructing the compute graphs. see:
+//   - llama_kv_cache_unified_state_i
+//   - llama_kv_cache_unified_iswa_state_i
+//   ...
+//
+// these extended interfaces should not mutate neither the memory, nor the current memory state
+// the only method that can mutate the memory and the memory state is llama_memory_i::apply()
+//
 class llama_memory_state_i {
 public:
     virtual ~llama_memory_state_i() = default;

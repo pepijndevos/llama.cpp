@@ -40,6 +40,9 @@ struct llama_kv_cache : public llama_memory_i {
     virtual bool update(llama_context & lctx) = 0;
 
     // schedule a defrag if the fragmentation threshold is exceeded. otherwise, do nothing
+    // TODO: change to
+    //   llama_memory_state_ptr init_defrag(float thold) = 0;
+    //
     virtual void defrag_sched(float thold) = 0;
 
     // getters
@@ -253,7 +256,7 @@ public:
     virtual ggml_tensor * get_k(ggml_context * ctx, int32_t il) const = 0;
     virtual ggml_tensor * get_v(ggml_context * ctx, int32_t il) const = 0;
 
-    // store k_cur and v_cur in the cache based on the current head location
+    // store k_cur and v_cur in the cache based on the provided head location
     virtual ggml_tensor * cpy_k(ggml_context * ctx, ggml_tensor * k_cur, int32_t il) const = 0;
     virtual ggml_tensor * cpy_v(ggml_context * ctx, ggml_tensor * v_cur, int32_t il) const = 0;
 
@@ -359,6 +362,8 @@ public:
 // llama_kv_cache_recurrent
 //
 
+// TODO: extract the KV cache state used for graph computation into llama_kv_cache_recurrent_state_i
+//       see the implementation of llama_kv_cache_unified_state_i for an example how to do it
 class llama_kv_cache_recurrent : public llama_kv_cache {
 public:
     llama_kv_cache_recurrent(

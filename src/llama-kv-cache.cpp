@@ -136,7 +136,10 @@ private:
     std::vector<uint32_t> heads;
     std::vector<llama_ubatch> ubatches;
 
+    //
     // data needed for building the compute graph for the current ubatch:
+    //
+
     // a heuristic, to avoid attending the full cache if it is not yet utilized
     // as the cache gets filled, the benefit from this heuristic disappears
     int32_t n_kv;
@@ -1876,7 +1879,10 @@ private:
 
     std::vector<llama_ubatch> ubatches;
 
+    //
     // data needed for building the compute graph for the current ubatch:
+    //
+
     int32_t n_kv_base;
     int32_t head_base;
 
@@ -2123,7 +2129,7 @@ public:
         return kv->s_copy(i);
     }
 
-    float   s_mask(int i) const override {
+    float s_mask(int i) const override {
         return kv->s_mask(i);
     }
 
@@ -2132,13 +2138,18 @@ private:
 
     llama_kv_cache_recurrent * kv;
 
-    const bool is_full = false;
-
     llama_sbatch sbatch;
 
     size_t i_next = 0;
 
     std::vector<llama_ubatch> ubatches;
+
+    //
+    // data needed for building the compute graph for the current ubatch:
+    // TODO: extract all the state like `head` and `n` here
+    //
+
+    const bool is_full = false;
 };
 
 llama_kv_cache_recurrent::llama_kv_cache_recurrent(
