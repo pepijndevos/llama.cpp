@@ -31,6 +31,9 @@ struct llama_kv_cache : public llama_memory_i {
             bool embd_pooled,
             bool logits_all) = 0;
 
+    // simulate full cache, used for allocating worst-case compute buffers
+    virtual llama_memory_state_ptr init_full() = 0;
+
     // process any pending defrag/shift/etc. operations
     // optionally call once before processing a new batch
     // return true if any operations were performed
@@ -38,9 +41,6 @@ struct llama_kv_cache : public llama_memory_i {
 
     // schedule a defrag if the fragmentation threshold is exceeded. otherwise, do nothing
     virtual void defrag_sched(float thold) = 0;
-
-    // simulate full cache, used for allocating worst-case compute buffers
-    virtual void set_full() = 0;
 
     // getters
     virtual bool get_can_shift() const = 0;
@@ -106,11 +106,11 @@ public:
             bool embd_pooled,
             bool logits_all) override;
 
+    llama_memory_state_ptr init_full() override;
+
     bool update(llama_context & lctx) override;
 
     void defrag_sched(float thold) override;
-
-    void set_full() override;
 
     bool get_can_shift() const override;
 
@@ -123,26 +123,25 @@ public:
     // llama_kv_cache_unified specific API
     //
 
-    // data needed for building the compute graph for the current ubatch
-    struct compute_state {
-        // a heuristic, to avoid attending the full cache if it is not yet utilized
-        // as the cache gets filled, the benefit from this heuristic disappears
-        int32_t n_kv;
-
-        // the beginning of the current slot in which the ubatch will be inserted
-        int32_t head;
-    };
-
-    uint32_t get_n_kv() const;
     uint32_t get_size() const;
 
-    // get views of the current state of the cache
-    ggml_tensor * get_k(ggml_context * ctx, int32_t il) const;
-    ggml_tensor * get_v(ggml_context * ctx, int32_t il) const;
+    //
+    // graph_build API
+    //
 
-    // store k_cur and v_cur in the cache based on the current head location
-    ggml_tensor * cpy_k(ggml_context * ctx, ggml_tensor * k_cur, int32_t il) const;
-    ggml_tensor * cpy_v(ggml_context * ctx, ggml_tensor * v_cur, int32_t il) const;
+    uint32_t get_n_kv() const;
+
+    // get views of the current state of the cache
+    ggml_tensor * get_k(ggml_context * ctx, int32_t il, uint32_t n_kv) const;
+    ggml_tensor * get_v(ggml_context * ctx, int32_t il, uint32_t n_kv) const;
+
+    // store k_cur and v_cur in the cache based on the provided head location
+    ggml_tensor * cpy_k(ggml_context * ctx, ggml_tensor * k_cur, int32_t il, uint32_t head_cur) const;
+    ggml_tensor * cpy_v(ggml_context * ctx, ggml_tensor * v_cur, int32_t il, uint32_t head_cur) const;
+
+    //
+    // preparation API
+    //
 
     // find places for the provided ubatches in the cache, returns the head locations
     // return empty vector on failure
@@ -153,8 +152,11 @@ public:
     int32_t find_slot(const llama_ubatch & ubatch) const;
 
     // emplace the ubatch context into slot: [head_cur, head_cur + ubatch.n_tokens)
-    // if cstate is not null, it is populated with the necessary information for building the compute graph
-    void apply_ubatch(uint32_t head_cur, const llama_ubatch & ubatch, compute_state * cstate);
+    void apply_ubatch(uint32_t head_cur, const llama_ubatch & ubatch);
+
+    //
+    // set_input API
+    //
 
     void set_input_kq_mask   (ggml_tensor * dst, const llama_ubatch * ubatch, bool causal_attn) const;
     void set_input_k_shift   (ggml_tensor * dst) const;
@@ -179,12 +181,6 @@ private:
     // the current index from where we start searching for a free slot in the ring buffer of KV cells (see find_slot())
     // note: this is not part of the KV state and it's only used to speed-up the find_slot() method
     uint32_t head = 0;
-
-    // updated before each graph build via apply_ubatch()
-    //   this is fleeting state, which is used only during the computation of the current ubatch
-    //   it's accessed via methods such as get_k()/get_v() and cpy_k()/cpy_v()
-    //   if it is nullptr, the KV cache is assumed in "full" state (used for reserving worst-case graphs)
-    const compute_state * cstate = nullptr;
 
     const uint32_t n_seq_max = 1;
 
@@ -247,6 +243,26 @@ private:
     bool state_read_data(llama_io_read_i & io, uint32_t cell_count);
 };
 
+class llama_kv_cache_unified_state_i : public llama_memory_state_i {
+public:
+    virtual ~llama_kv_cache_unified_state_i() = default;
+
+    virtual uint32_t get_n_kv() const = 0;
+
+    // get views of the current state of the cache
+    virtual ggml_tensor * get_k(ggml_context * ctx, int32_t il) const = 0;
+    virtual ggml_tensor * get_v(ggml_context * ctx, int32_t il) const = 0;
+
+    // store k_cur and v_cur in the cache based on the current head location
+    virtual ggml_tensor * cpy_k(ggml_context * ctx, ggml_tensor * k_cur, int32_t il) const = 0;
+    virtual ggml_tensor * cpy_v(ggml_context * ctx, ggml_tensor * v_cur, int32_t il) const = 0;
+
+    virtual void set_input_k_shift(ggml_tensor * dst) const = 0;
+
+    virtual void set_input_kq_mask   (ggml_tensor * dst, const llama_ubatch * ubatch, bool causal_attn) const = 0;
+    virtual void set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch * ubatch) const = 0;
+};
+
 //
 // llama_kv_cache_unified_iswa
 //
@@ -295,11 +311,11 @@ public:
             bool embd_pooled,
             bool logits_all) override;
 
+    llama_memory_state_ptr init_full() override;
+
     bool update(llama_context & lctx) override;
 
     void defrag_sched(float thold) override;
-
-    void set_full() override;
 
     bool get_can_shift() const override;
 
@@ -320,6 +336,23 @@ private:
 
     std::unique_ptr<llama_kv_cache_unified> kv_base;
     std::unique_ptr<llama_kv_cache_unified> kv_swa;
+};
+
+class llama_kv_cache_unified_iswa_state_i : public llama_memory_state_i {
+public:
+    virtual ~llama_kv_cache_unified_iswa_state_i() = default;
+
+    virtual uint32_t get_n_kv(bool is_swa) const = 0;
+
+    virtual ggml_tensor * get_k(bool is_swa, ggml_context * ctx, int32_t il) const = 0;
+    virtual ggml_tensor * get_v(bool is_swa, ggml_context * ctx, int32_t il) const = 0;
+
+    virtual ggml_tensor * cpy_k(bool is_swa, ggml_context * ctx, ggml_tensor * k_cur, int32_t il) const = 0;
+    virtual ggml_tensor * cpy_v(bool is_swa, ggml_context * ctx, ggml_tensor * v_cur, int32_t il) const = 0;
+
+    virtual void set_input_kq_mask(bool is_swa, ggml_tensor * dst, const llama_ubatch * ubatch, bool causal_attn) const = 0;
+
+    virtual void set_input_pos_bucket(bool is_swa, ggml_tensor * dst, const llama_ubatch * ubatch) const = 0;
 };
 
 //
@@ -363,11 +396,11 @@ public:
             bool embd_pooled,
             bool logits_all) override;
 
+    llama_memory_state_ptr init_full() override;
+
     bool update(llama_context & lctx) override;
 
     void defrag_sched(float thold) override;
-
-    void set_full() override;
 
     bool prepare(const std::vector<llama_ubatch> & ubatches);
 
@@ -437,4 +470,19 @@ private:
 
     bool state_read_meta(llama_io_read_i & io, uint32_t cell_count, llama_seq_id dest_seq_id = -1);
     bool state_read_data(llama_io_read_i & io, uint32_t cell_count);
+};
+
+class llama_kv_cache_recurrent_state_i : public llama_memory_state_i {
+public:
+    virtual ~llama_kv_cache_recurrent_state_i() = default;
+
+    virtual uint32_t get_n_kv() const = 0;
+    virtual uint32_t get_head() const = 0;
+    virtual uint32_t get_size() const = 0;
+
+    virtual ggml_tensor * get_k_l(int32_t il) const = 0;
+    virtual ggml_tensor * get_v_l(int32_t il) const = 0;
+
+    virtual int32_t s_copy(int i) const = 0;
+    virtual float   s_mask(int i) const = 0;
 };

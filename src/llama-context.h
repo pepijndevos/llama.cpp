@@ -18,6 +18,7 @@ struct llama_kv_cache;
 class llama_io_read_i;
 class llama_io_write_i;
 
+class llama_memory_i;
 class llama_memory_state_i;
 
 struct llama_context {
@@ -196,14 +197,15 @@ public:
     ggml_status graph_compute(ggml_cgraph * gf, bool batched);
 
     // reserve a graph with a dummy ubatch of the specified size
-    ggml_cgraph * graph_reserve(uint32_t n_tokens, uint32_t n_seqs, uint32_t n_outputs);
+    ggml_cgraph * graph_reserve(uint32_t n_tokens, uint32_t n_seqs, uint32_t n_outputs, const llama_memory_state_i * mstate);
 
 private:
     llm_graph_result_ptr graph_build(
-            ggml_context * ctx,
-             ggml_cgraph * gf,
-      const llama_ubatch & ubatch,
-          llm_graph_type   gtype);
+                    ggml_context * ctx,
+                     ggml_cgraph * gf,
+              const llama_ubatch & ubatch,
+                  llm_graph_type   gtype,
+      const llama_memory_state_i * mstate);
 
     llm_graph_cb graph_get_cb() const;
 
